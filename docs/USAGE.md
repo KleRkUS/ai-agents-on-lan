@@ -2,6 +2,8 @@
 
 aio runs several AI CLI agents from one terminal. A list sits on the left. The agent you open fills the right side. Agents can message each other through local MCP servers. Agents stay on the machine where you start them. That machine needs Linux or macOS, tmux, and the agent CLIs on `PATH` (`claude`, `agent`, `codex`, or anything else). Another device reaches them through a relay, which does not run the agents itself.
 
+To write another application that drives those agents, read [INTEGRATION.md](INTEGRATION.md).
+
 ## Build
 
 You need CMake 3.20 or newer, a C++20 compiler, and git. The first configure downloads FTXUI, nlohmann/json, and cpp-httplib.
