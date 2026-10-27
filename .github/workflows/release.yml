@@ -1,0 +1,123 @@
+name: Release
+
+# Builds executables for every supported platform and publishes a GitHub
+# release tagged v<version>, where <version> comes from CMakeLists.txt.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Require main branch
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases can only be made from main (got ${{ github.ref }})"
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(sed -nE 's/^project\(ai-orchestrator VERSION ([^ )]+).*/\1/p' CMakeLists.txt)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::invalid version '$version'"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version"
+
+      - name: Ensure tag does not exist
+        run: |
+          if git rev-parse -q --verify "refs/tags/v${{ steps.version.outputs.version }}" >/dev/null; then
+            echo "::error::Tag v${{ steps.version.outputs.version }} already exists. Bump the version in CMakeLists.txt."
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-22.04
+            cmake_args: -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          - target: linux-arm64
+            os: ubuntu-22.04-arm
+            cmake_args: -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          - target: macos-arm64
+            os: macos-14
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          - target: macos-x86_64
+            os: macos-14
+            cmake_args: -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DAIO_BUILD_TESTS=OFF
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAIO_WERROR=ON ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build --parallel --target aio
+
+      - name: Test
+        if: ${{ !contains(matrix.cmake_args, 'AIO_BUILD_TESTS=OFF') }}
+        run: cmake --build build --parallel && ctest --test-dir build --output-on-failure
+
+      - name: Verify version
+        if: matrix.target != 'macos-x86_64'
+        run: ./build/aio --version | grep -F "aio $VERSION"
+
+      - name: Package
+        run: |
+          name="aio-$VERSION-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp build/aio "dist/$name/"
+          strip "dist/$name/aio" || true
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        run: |
+          gh release create "v$VERSION" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --generate-notes
